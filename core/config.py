@@ -41,6 +41,9 @@ class Settings:
     sandbox_pids_limit: int = 64
     sandbox_max_output_bytes: int = 1_048_576
     sandbox_docker_image: str = "procoder-sandbox:local"
+    voice_max_duration_seconds: int = 30
+    voice_model: str = "base"
+    voice_transcription_timeout: int = 300
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -90,6 +93,13 @@ class Settings:
             sandbox_docker_image=values.get(
                 "SANDBOX_DOCKER_IMAGE", "procoder-sandbox:local"
             ).strip(),
+            voice_max_duration_seconds=_integer(
+                values, "VOICE_MAX_DURATION_SECONDS", 30, minimum=1, maximum=300
+            ),
+            voice_model=values.get("VOICE_MODEL", "base").strip(),
+            voice_transcription_timeout=_integer(
+                values, "VOICE_TRANSCRIPTION_TIMEOUT", 300, minimum=1, maximum=1800
+            ),
         )
         if not _DOCKER_MEMORY_PATTERN.fullmatch(settings.sandbox_memory_limit):
             raise ValueError(
@@ -102,6 +112,8 @@ class Settings:
             raise ValueError("GEMINI_MODEL must not be empty.")
         if not settings.nvidia_model:
             raise ValueError("NVIDIA_MODEL must not be empty.")
+        if not settings.voice_model:
+            raise ValueError("VOICE_MODEL must not be empty.")
         if not settings.nvidia_base_url.startswith("https://"):
             raise ValueError("NVIDIA_BASE_URL must use HTTPS.")
         if not settings.codex_cli:

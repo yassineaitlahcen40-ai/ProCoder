@@ -1,6 +1,6 @@
 # ProCoder
 
-ProCoder is an AI-powered multi-agent coding system that turns a natural-language programming request into a structured specification and code, tests that code in a restricted Docker sandbox, reviews the results with AI, and can automatically repair failures.
+ProCoder is an AI-powered multi-agent coding system that turns a natural-language programming request into a structured specification and code, tests that code in a restricted Docker sandbox, reviews the results with AI, and can automatically repair failures. Its optional voice command records a spoken request, transcribes it locally, and asks for confirmation before starting the same workflow.
 
 ## System Overview
 
@@ -20,6 +20,10 @@ User Request
   -> Final Result
 ```
 
+The optional voice path records a spoken request and transcribes it locally
+before the confirmed transcript enters the normal `run` workflow. Audio is not
+sent to a cloud speech-to-text provider.
+
 The Prompt Agent converts the request into a validated structured specification. Gemini is the current provider. The Coding Agent uses the OpenAI Codex CLI to return structured project files; ProCoder validates and writes them into a per-run workspace. When repair is needed, Codex returns a structured file patch instead of editing files or running generated code.
 
 Docker is the authoritative environment for generated-code tests. NVIDIA NIM, configured to use Nemotron by default, reviews the specification, project source and actual Docker test evidence; it can diagnose issues but cannot claim that a failed Docker test passed.
@@ -38,12 +42,14 @@ Python controls workflow state, repair attempts, Docker retests, NVIDIA reviews 
 - Configurable bounded repair attempts.
 - JSON Lines runtime logging and per-run persisted specification, generated-file metadata, test results, repair history and final result.
 - Protections for generated workspace paths, symlinks, hard links, credential-like files and Docker configuration.
+- Explicit, bounded microphone recording, local CPU transcription, transcript validation and confirmation before any coding workflow is started.
 
 ## Requirements
 
 For a fresh development machine, install:
 
-- **Python 3.12 or newer** and its standard `venv`/`pip` tools. The sandbox image itself uses Python 3.12. Python 3.12+ is the recommended host version.
+- **Python 3.12 or newer** and its standard `venv`/`pip` tools. The sandbox image itself uses Python 3.12. The voice dependencies installed and imported successfully on Python 3.14.7, but Faster-Whisper's published classifiers currently list Python only through 3.11; voice inference should be verified on the target machine.
+- The optional `voice` command also uses Faster-Whisper and `sounddevice`, installed from the pinned `requirements.txt`. A working microphone is required. Internet access is needed for the first public model download; model weights are then cached locally.
 - **Git**, to clone the repository.
 - **Docker Desktop** on Windows or macOS, or a Docker Engine installation on Linux. Docker must be running for project tests and the complete workflow. No NVIDIA GPU is required by the local Docker runner.
 - **OpenAI Codex CLI**, available as `codex` on `PATH` or in the installed OpenAI Codex VS Code extension. The CLI must be authenticated before generation or repair. The adapter uses Codex CLI authentication; ProCoder does not use an OpenAI API key for it.
@@ -90,6 +96,8 @@ python -m pip install --requirement requirements.txt
 ```
 
 The pinned runtime dependencies are listed in `requirements.txt`.
+PyAV is pinned to `18.0.0` for compatibility with Faster-Whisper 1.2.1, which
+passes the `metadata_errors` option to `av.open`; PyAV 19 removed that option.
 
 ### 4. Install and verify Docker
 
@@ -123,7 +131,9 @@ Create a Gemini API key in Google AI Studio and an NVIDIA API key with access to
 
 ## Environment Configuration
 
-`.env.example` is the source of truth for supported environment variable names and defaults. Copy it to a local `.env`:
+`.env.example` is the source of truth for supported environment variable names and defaults. Voice settings are `VOICE_MAX_DURATION_SECONDS` (default `30`, allowed `1`–`300`), `VOICE_MODEL` (default `base`), and `VOICE_TRANSCRIPTION_TIMEOUT` (default `300` seconds). Transcription runs locally on CPU with `int8` and does not receive Gemini or NVIDIA credentials.
+
+Copy it to a local `.env`:
 
 Windows PowerShell:
 
@@ -168,6 +178,9 @@ The remaining variables in `.env.example` configure model selection, provider ti
 | `SANDBOX_PIDS_LIMIT` | Maximum container process count | `64` |
 | `SANDBOX_MAX_OUTPUT_BYTES` | Combined stdout/stderr capture limit | `1048576` |
 | `SANDBOX_DOCKER_IMAGE` | Local sandbox image tag | `procoder-sandbox:local` |
+| `VOICE_MAX_DURATION_SECONDS` | Maximum duration for one explicit microphone recording | `30` |
+| `VOICE_MODEL` | Local Faster-Whisper model name | `base` |
+| `VOICE_TRANSCRIPTION_TIMEOUT` | Local transcription worker timeout in seconds | `300` |
 
 `OPENAI_API_KEY` appears in the example only as a reserved, blank setting; the current Codex adapter intentionally uses the Codex CLI's own authentication and does not use that key.
 
@@ -239,6 +252,36 @@ Run the complete generate, Docker-test, review and bounded-repair workflow:
 python main.py run "Create a Python function that determines whether a number is prime."
 ```
 
+Record a spoken request, then confirm or reject its transcript before running
+the complete workflow:
+
+```sh
+python main.py voice
+```
+
+Press Enter to start; press Enter again to stop, or the configured duration
+limit stops recording automatically. The transcript is displayed before a
+confirmation prompt. Anything other than `y` or `yes` rejects it. The first
+voice run may download the selected public model; no paid transcription API is
+used.
+
+To check whether the configured local model is already cached and can load
+with CPU `int8`, without recording audio or downloading model files, run:
+
+```sh
+python main.py voice-check
+```
+
+To explicitly download/cache the configured model if needed and initialize it
+with CPU `int8`, without recording or transcribing audio, run:
+
+```sh
+python main.py voice-setup
+```
+
+This command may access Hugging Face to retrieve Faster-Whisper model files.
+It does not call Gemini, Codex, NVIDIA, Docker, or the coding workflow.
+
 The complete workflow requires a configured Gemini key, authenticated Codex CLI, Docker daemon and sandbox image, and a configured NVIDIA key/model. Output includes the run ID, generated files, test/review status, repair attempts and final termination/success summary. Generated projects are under `workspace/generated_code/<run_id>/`; per-run evidence is in `workspace/test_results/<run_id>.json`.
 
 ## Automatic Repair Loop
@@ -281,6 +324,7 @@ agents/
 core/                 Settings, typed models and logging
 orchestrator/         Deterministic repair controller
 sandbox/              Docker runner, image definition and smoke test
+voice/                Microphone capture, transcript handling and local STT adapter
 workspace/            Generated projects and run-metadata storage
 tests/                Offline tests and Docker-conditional integrations
 docs/                 Architecture and implementation notes
@@ -295,6 +339,7 @@ requirements.txt      Pinned Python dependencies
 - The test container has `--network=none`, a read-only root filesystem, a non-root user, dropped capabilities, `no-new-privileges`, memory/CPU/PID limits, and a timeout.
 - The container receives only a read-only bind mount of the selected generated run. It is not given the Docker socket or provider credentials; the Docker CLI process also uses a restricted environment allowlist.
 - Workspace path validation rejects traversal, absolute paths, symlinks/junctions, hard links, protected credential/configuration files and Docker configuration. Repair patches are confined to the generated run workspace.
+- Voice capture is explicitly user-started and duration-bounded. The temporary WAV is deleted after transcription; the local transcription subprocess receives only the audio path and model name, with an operating-system environment allowlist that omits provider credentials. Transcripts are untrusted and require user confirmation before the normal workflow starts.
 - `.env` and runtime outputs are excluded from Git. Provider prompts and credentials are not copied into runtime logs.
 - Generated source, comments and process output are treated as untrusted data by review/repair prompts. Docker results, not LLM statements, determine whether tests actually passed.
 

@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Callable, TextIO
 
 from agents.coding_agent.errors import CodingAgentError, CodexCliNotFoundError
 from agents.coding_agent.providers.openai_codex import (
@@ -33,6 +33,10 @@ from orchestrator.repair_controller import RepairController
 from sandbox.runner import DockerSandboxRunner
 from workspace.generated_project import GeneratedProjectWriter
 from workspace.run_metadata import RunMetadataError, RunMetadataStore
+from voice.errors import VoiceError
+from voice.providers.faster_whisper import FasterWhisperProvider
+from voice.recorder import MicrophoneRecorder
+from voice.service import VoiceInputService
 
 
 _RUN_ID_PATTERN = re.compile(
@@ -73,6 +77,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="generate a project and test it in Docker",
     )
     run_parser.add_argument("request", help="informal software request")
+    commands.add_parser(
+        "voice",
+        help="record and confirm a spoken request before running ProCoder",
+    )
+    commands.add_parser(
+        "voice-check",
+        help="check the configured Whisper model using cached files only",
+    )
+    commands.add_parser(
+        "voice-setup",
+        help="download if needed and load the configured local Whisper model",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -119,13 +135,213 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_generate_command(
             args.request, settings, logger, execute_tests=True
         )
+    if args.command == "voice":
+        return run_voice_command(settings, logger)
+    if args.command == "voice-check":
+        return run_voice_check_command(settings, logger)
+    if args.command == "voice-setup":
+        return run_voice_setup_command(settings, logger)
 
     print(
-        "The full AI workflow is not available yet. Use 'prompt', 'generate', "
-        "'test', or 'run', or --check-config to validate settings.",
+        "Use 'prompt', 'generate', 'test', 'review', 'run', 'voice', "
+        "'voice-check', or 'voice-setup', "
+        "or --check-config to validate settings.",
         file=sys.stderr,
     )
     return 2
+
+
+def run_voice_command(
+    settings: Settings,
+    logger: logging.Logger,
+    *,
+    input_fn: Callable[[str], str] | None = None,
+    output: TextIO | None = None,
+    error_output: TextIO | None = None,
+) -> int:
+    output_stream = output if output is not None else sys.stdout
+    errors = error_output if error_output is not None else sys.stderr
+    prompt_input = input_fn or input
+    print("Voice input uses local CPU transcription; no audio is sent to a cloud "
+          "transcription service.", file=output_stream)
+    try:
+        prompt_input("Press Enter to start recording (Ctrl+C to cancel): ")
+        voice_service = VoiceInputService(
+            MicrophoneRecorder(),
+            FasterWhisperProvider(
+                settings.voice_model,
+                settings.voice_transcription_timeout,
+            ),
+        )
+        transcript = voice_service.transcribe_request(
+            settings.voice_max_duration_seconds
+        )
+    except KeyboardInterrupt:
+        print("\nVoice input cancelled.", file=output_stream)
+        return 0
+    except (EOFError, OSError):
+        print("Voice input cancelled.", file=output_stream)
+        return 0
+    except VoiceError as exc:
+        diagnostics = getattr(exc, "diagnostics", {})
+        logger.warning(
+            "voice_input_failed",
+            extra={
+                "event_data": {
+                    "event": "voice_input_failed",
+                    "error_code": type(exc).__name__,
+                    "underlying_exception_type": diagnostics.get(
+                        "underlying_exception_type"
+                    ),
+                    "cause_type": diagnostics.get("cause_type"),
+                    "safe_reason": diagnostics.get("safe_reason"),
+                    "failure_phase": diagnostics.get("failure_phase"),
+                    "model": diagnostics.get("model", settings.voice_model),
+                    "device": diagnostics.get("device", "cpu"),
+                    "compute_type": diagnostics.get("compute_type", "int8"),
+                    "model_cached": diagnostics.get("model_cached"),
+                    "model_download_attempted": diagnostics.get(
+                        "model_download_attempted"
+                    ),
+                    "audio_valid": diagnostics.get("audio_valid"),
+                    "audio_size_bytes": diagnostics.get("audio_size_bytes"),
+                }
+            },
+        )
+        print(exc.safe_message, file=errors)
+        return 1
+
+    print(f"\nTRANSCRIPT:\n{transcript}\n", file=output_stream)
+    try:
+        confirmed = prompt_input("Run ProCoder with this transcript? [y/N] ")
+    except (EOFError, KeyboardInterrupt, OSError):
+        print("Voice request rejected; nothing was run.", file=output_stream)
+        return 0
+    if confirmed.strip().casefold() not in {"y", "yes"}:
+        print("Voice request rejected; nothing was run.", file=output_stream)
+        return 0
+    return run_generate_command(
+        transcript, settings, logger, execute_tests=True,
+        stdout=output_stream, stderr=errors,
+    )
+
+
+def run_voice_check_command(
+    settings: Settings,
+    logger: logging.Logger,
+    *,
+    output: TextIO | None = None,
+    error_output: TextIO | None = None,
+) -> int:
+    output_stream = output if output is not None else sys.stdout
+    errors = error_output if error_output is not None else sys.stderr
+    provider = FasterWhisperProvider(
+        settings.voice_model,
+        settings.voice_transcription_timeout,
+    )
+    diagnostics = provider.check_model()
+    event_data = {
+        "event": "voice_model_check",
+        **{
+            key: diagnostics.get(key)
+            for key in (
+                "model",
+                "device",
+                "compute_type",
+                "model_cached",
+                "model_download_attempted",
+                "failure_phase",
+                "underlying_exception_type",
+                "cause_type",
+                "safe_reason",
+            )
+        },
+    }
+    if diagnostics.get("ok") is True:
+        logger.info("voice_model_check", extra={"event_data": event_data})
+        print(
+            f"VOICE MODEL READY: {settings.voice_model} "
+            "(loaded locally; no download attempted)",
+            file=output_stream,
+        )
+        return 0
+    logger.warning("voice_model_check", extra={"event_data": event_data})
+    print("VOICE MODEL CHECK FAILED", file=errors)
+    for key in (
+        "failure_phase",
+        "model",
+        "device",
+        "compute_type",
+        "model_cached",
+        "model_download_attempted",
+        "underlying_exception_type",
+        "cause_type",
+        "safe_reason",
+    ):
+        value = diagnostics.get(key)
+        if value is not None:
+            print(f"{key}: {value}", file=errors)
+    return 1
+
+
+def run_voice_setup_command(
+    settings: Settings,
+    logger: logging.Logger,
+    *,
+    output: TextIO | None = None,
+    error_output: TextIO | None = None,
+) -> int:
+    output_stream = output if output is not None else sys.stdout
+    errors = error_output if error_output is not None else sys.stderr
+    print(f"MODEL: {settings.voice_model}", file=output_stream)
+    print("DEVICE: cpu", file=output_stream)
+    print("COMPUTE TYPE: int8", file=output_stream)
+    print(
+        "Model files may be downloaded from the Faster-Whisper model provider "
+        "(Hugging Face) if they are not already cached.",
+        file=output_stream,
+    )
+    diagnostics = FasterWhisperProvider(
+        settings.voice_model,
+        settings.voice_transcription_timeout,
+    ).setup_model()
+    event_data = {
+        "event": "voice_model_setup",
+        **{
+            key: diagnostics.get(key)
+            for key in (
+                "model",
+                "device",
+                "compute_type",
+                "model_cached",
+                "model_download_attempted",
+                "failure_phase",
+                "underlying_exception_type",
+                "cause_type",
+                "safe_reason",
+            )
+        },
+    }
+    if diagnostics.get("ok") is True:
+        logger.info("voice_model_setup", extra={"event_data": event_data})
+        print("VOICE MODEL READY: loaded successfully with CPU int8.", file=output_stream)
+        return 0
+
+    logger.warning("voice_model_setup", extra={"event_data": event_data})
+    print("VOICE MODEL SETUP FAILED", file=errors)
+    for key in (
+        "underlying_exception_type",
+        "cause_type",
+        "safe_reason",
+        "failure_phase",
+        "model",
+        "device",
+        "compute_type",
+    ):
+        value = diagnostics.get(key)
+        if value is not None:
+            print(f"{key}: {value}", file=errors)
+    return 1
 
 
 def run_prompt_command(

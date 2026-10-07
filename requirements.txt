@@ -3,3 +3,6 @@ google-genai==2.28.0
 httpx==0.28.1
 pydantic==2.13.5
 python-dotenv==1.1.1
+faster-whisper==1.2.1
+av==18.0.0
+sounddevice[numpy]==0.5.6

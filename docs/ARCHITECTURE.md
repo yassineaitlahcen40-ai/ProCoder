@@ -223,3 +223,46 @@ optional Docker integration uses deterministic fake Codex/NVIDIA adapters but
 the actual restricted Docker runner; it verifies the broken test fails and
 then verifies the patched source passes. It makes no external provider calls
 and skips unless Docker Desktop and the local sandbox image are available.
+
+## Stage 7: explicit voice input
+
+```mermaid
+flowchart LR
+    U[User] -->|explicit start and stop; bounded duration| M[MicrophoneRecorder]
+    M -->|temporary WAV| V[VoiceInputService]
+    V -->|audio file only| FW[Faster-Whisper local CPU worker]
+    FW -->|transcript| VAL[Transcript validation]
+    VAL --> CONF[User confirms transcript]
+    CONF -->|accepted| RUN[Existing main.py run workflow]
+    CONF -->|rejected or cancelled| STOP[Stop; no coding workflow]
+```
+
+`python main.py voice` requires an explicit Enter action to start capture.
+Capture ends on a second Enter or at `VOICE_MAX_DURATION_SECONDS` (default 30,
+bounded to 300 seconds). The recorder writes a temporary mono 16 kHz WAV file,
+which the voice service deletes after transcription, including on provider
+failure. Faster-Whisper runs locally on CPU with CTranslate2 `int8`; its
+default model is `base`. The model may be downloaded and cached on the first
+explicit voice run. No cloud transcription API is used.
+
+`python main.py voice-check` checks the configured model using
+`local_files_only=True`; it never downloads model files or records audio. It
+reports cached-model load errors with bounded, path-redacted diagnostics.
+
+`python main.py voice-setup` is the explicit setup path. It uses the normal
+`WhisperModel` loading mechanism, which downloads the configured model from
+Hugging Face only if needed, then initializes it with CPU `int8`. It neither
+records audio nor transcribes; it does not invoke other providers or the
+ProCoder coding workflow. Failures report bounded, path-redacted exception
+diagnostics.
+
+The transcription worker is a subprocess receiving only the WAV path and model
+name, with an operating-system environment allowlist rather than the parent
+process environment. Gemini/NVIDIA/provider credentials are not passed to it.
+The transcript is treated as untrusted input, bounded and validated, displayed
+to the user, and must be confirmed before the existing
+`run_generate_command(..., execute_tests=True)` workflow is invoked. Rejection
+or cancellation does not call the coding workflow. Voice cannot execute shell
+commands or bypass specification generation, Docker execution, or the repair
+controller. Capture and transcription use provider-independent interfaces
+under `voice/`, allowing the speech provider to be replaced independently.
