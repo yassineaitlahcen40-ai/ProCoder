@@ -412,6 +412,11 @@ def run_generate_command(
     phase = "prompt"
     specification: Specification | None = None
     generated: GeneratedCode | None = None
+    if execute_tests:
+        logger.info(
+            "workflow_started",
+            extra={"event_data": {"event": "workflow_started", "run_id": run_id}},
+        )
     if resolve_codex_executable(settings.codex_cli) is None:
         error = CodexCliNotFoundError()
         logger.warning(
@@ -431,10 +436,29 @@ def run_generate_command(
         return 1
 
     try:
+        logger.info(
+            "planning_started",
+            extra={"event_data": {"event": "planning_started", "run_id": run_id}},
+        )
         specification = GeminiPromptAgent(settings).create_specification(request)
+        logger.info(
+            "planning_completed",
+            extra={
+                "event_data": {
+                    "event": "planning_completed",
+                    "run_id": run_id,
+                    "provider": specification.provider,
+                    "model": specification.model,
+                }
+            },
+        )
         phase = "coding"
         writer = GeneratedProjectWriter(project_root or PROJECT_ROOT)
         run_directory = writer.create_run_directory(run_id)
+        logger.info(
+            "generation_started",
+            extra={"event_data": {"event": "generation_started", "run_id": run_id}},
+        )
         generated = OpenAICodexCodingAgent(settings, run_directory).generate(
             specification
         )

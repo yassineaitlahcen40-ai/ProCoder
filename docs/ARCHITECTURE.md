@@ -266,3 +266,112 @@ or cancellation does not call the coding workflow. Voice cannot execute shell
 commands or bypass specification generation, Docker execution, or the repair
 controller. Capture and transcription use provider-independent interfaces
 under `voice/`, allowing the speech provider to be replaced independently.
+
+## Stage 8: VS Code extension
+
+```mermaid
+flowchart LR
+    U[VS Code webview] -->|versioned JSONL commands| B[Python bridge process]
+    B -->|structured progress/result events| U
+    B -->|existing run_generate_command| O[Python workflow and repair controller]
+    O -->|generated run ID and safe file inventory| B
+    U -->|validated run ID + relative filename| FS[GeneratedProjectWriter workspace]
+    U -->|explicit voice start/stop| V[Existing local voice components]
+    V -->|untrusted transcript| U
+    U -->|explicit approve only| B
+```
+
+The extension is a presentation/control layer in `vscode-extension/`, built
+with TypeScript, the official VS Code Extension API and a small set of
+development-only npm dependencies. Its Activity Bar webview does not duplicate
+prompt generation, Codex execution, Docker testing, NVIDIA review, repair
+policy, transcript validation or secret handling.
+
+### Development, installation and launch
+
+The extension targets VS Code 1.95+ and Node.js 20+. From the
+`vscode-extension/` directory:
+
+```powershell
+npm.cmd ci
+npm.cmd test
+```
+
+`npm.cmd test` compiles TypeScript and runs offline tests for protocol parsing,
+workflow-state transitions and generated-file path validation. Open
+`vscode-extension/` in VS Code and press F5 to launch its Extension
+Development Host; select the ProCoder Activity Bar icon. The checked-in launch
+configuration discovers the backend at the parent ProCoder root. Set
+`procoder.pythonPath` to the backend virtual environment's Python executable.
+For actual runs, the root backend dependencies, `.env`, Codex CLI, Docker
+daemon and sandbox image, plus provider access, must be available.
+
+The extension starts `python -m bridge` as a child process in the backend root.
+It uses fixed module arguments (no shell) and a restricted environment
+allowlist containing only OS/runtime necessities. Python loads provider
+credentials from its own local configuration. The extension does not read or
+store `.env` values and does not send keys in protocol messages.
+
+### JSON Lines protocol, version 1
+
+Each stdin command and stdout event is one UTF-8 JSON object per line with
+`protocol_version: 1` and a `type` string. The backend reserves stdout for
+protocol output, captures normal CLI text, writes safe diagnostics to
+`logs/procoder.jsonl`, and whitelists fields when forwarding logger events.
+Request text and transcript contents are not written to runtime logs. The
+bridge rejects malformed messages, unsupported versions/commands and requests
+over its configured size bound.
+
+Commands:
+
+| Type | Purpose |
+| --- | --- |
+| `run` | Submit a text request to the existing full Python workflow. |
+| `voice_start` | Start the existing bounded local microphone workflow. |
+| `voice_stop` | Stop capture; does not approve or run its transcript. |
+| `transcript_decision` | Explicitly approve or reject a validated transcript. |
+| `cancel` | Cancel active voice capture; workflow cancellation is reported as unsupported while an AI provider or Docker is running. |
+| `shutdown` | Close an idle bridge; if work is active, it is allowed to finish. |
+
+The backend emits `ready`, `workflow_started`, `planning_started`,
+`planning_completed`, `generation_started`, `generation_completed`,
+`testing_started`, `testing_completed`, `review_started`, `review_completed`,
+`repair_started`, `repair_completed`, `workflow_stage_failed`,
+`workflow_completed`, `workflow_failed`, voice lifecycle/transcript events,
+and `protocol_error` as applicable. Test events expose real Docker status,
+exit code, timeout and bounded test counts. Review events expose the NVIDIA
+verdict and bounded decision booleans, not raw source, test output, prompts or
+review prose. The final event carries the run ID, termination/success state,
+repair attempt count, latest Docker and NVIDIA results, safe file names, and
+file change summaries.
+
+### Voice and transcript confirmation
+
+The webview sends `voice_start` and `voice_stop` to the backend. The bridge
+uses `MicrophoneRecorder`, `FasterWhisperProvider` and the existing transcript
+validator; it records no audio until the user explicitly starts capture.
+Audio is temporary and cleaned after local transcription. `transcript_ready`
+only displays editable transcript text. Only a separate
+`transcript_decision` with `approved: true` and a valid transcript invokes the
+normal full workflow. A rejection/cancellation never calls the coding
+workflow. Provider credentials are not passed to the isolated transcription
+worker.
+
+### Generated files and execution/security boundary
+
+The backend obtains file names through
+`GeneratedProjectWriter.read_files(run_id)`, which validates run IDs and the
+existing generated workspace rules. The webview cannot send a filesystem path
+or shell command; its `openFile` message contains only the run ID and a
+relative file name. The extension revalidates both, rejects sensitive names
+and traversal, checks for symlink/hard-link files and verifies canonical
+containment before asking VS Code to open the file. Generated code is never
+executed by TypeScript or the extension host. It remains executed only by the
+existing restricted Docker sandbox, and the existing configured repair limit
+remains authoritative.
+
+Cancellation is deliberately conservative: active microphone capture is
+cancellable; stopping an AI provider or Docker container mid-workflow is not
+exposed because the existing backend does not guarantee safe cancellation.
+Closing the extension bridge during active work waits for backend completion
+rather than asserting that the workflow was cancelled.

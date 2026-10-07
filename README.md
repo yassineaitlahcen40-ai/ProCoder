@@ -55,8 +55,9 @@ For a fresh development machine, install:
 - **OpenAI Codex CLI**, available as `codex` on `PATH` or in the installed OpenAI Codex VS Code extension. The CLI must be authenticated before generation or repair. The adapter uses Codex CLI authentication; ProCoder does not use an OpenAI API key for it.
 - **Gemini API access** for specification generation. Obtain a key through [Google AI Studio](https://aistudio.google.com/) and keep it private.
 - **NVIDIA NIM API access** for code review and diagnosis. Obtain/configure an API key through the [NVIDIA API Catalog](https://build.nvidia.com/) and verify access to the configured model. Availability, account access and any trial credits depend on NVIDIA's current terms.
+- **Node.js 20+ and npm** for optional VS Code extension development. They are not Python backend runtime requirements.
 
-**Node.js and npm are not runtime requirements for ProCoder.** They are needed only if you choose the npm installation method below for the Codex CLI.
+Node.js/npm can also be used for the Codex CLI installation method below.
 
 ## Installation
 
@@ -284,6 +285,76 @@ It does not call Gemini, Codex, NVIDIA, Docker, or the coding workflow.
 
 The complete workflow requires a configured Gemini key, authenticated Codex CLI, Docker daemon and sandbox image, and a configured NVIDIA key/model. Output includes the run ID, generated files, test/review status, repair attempts and final termination/success summary. Generated projects are under `workspace/generated_code/<run_id>/`; per-run evidence is in `workspace/test_results/<run_id>.json`.
 
+## Stage 8: VS Code extension
+
+The TypeScript extension adds a ProCoder Activity Bar sidebar. It sends
+structured commands to the Python backend and displays workflow progress,
+Docker/NVIDIA results, repair attempts and generated files. It does not
+reimplement the agents or repair loop.
+
+### Development install and launch
+
+1. Install VS Code 1.95 or newer and Node.js 20+.
+2. Open `vscode-extension/` as a folder in VS Code.
+3. In its integrated terminal, install the locked development dependencies
+   and run the offline extension tests:
+
+   ```powershell
+   npm.cmd ci
+   npm.cmd test
+   ```
+
+   `npm.cmd test` compiles the extension with TypeScript and runs the protocol,
+   state-transition and generated-path tests. `npm.cmd run compile` runs only
+   the compiler.
+4. Set the VS Code user setting `procoder.pythonPath` to the ProCoder virtual
+   environment's Python executable, for example
+   `C:\path\to\ProCoder\.venv\Scripts\python.exe`.
+5. Press **F5** to launch the Extension Development Host. Select the ProCoder
+   icon in the Activity Bar to open the sidebar. The development launcher
+   discovers the backend in the parent ProCoder directory. The backend's
+   `.env`, Python dependencies, Codex CLI, Docker daemon/image and provider
+   access must already be configured for a real workflow.
+
+The sidebar accepts text requests, reports agent/test/review/repair progress,
+and shows the final Docker and NVIDIA outcomes. Click a generated file to open
+it in VS Code. Voice recording is explicit and bounded by
+`VOICE_MAX_DURATION_SECONDS`; **Stop** ends capture, the transcript is shown
+for review, and only **Approve and run** submits it. **Reject** or **Cancel
+voice** does not start the coding workflow. Local Faster-Whisper transcription
+still uses the Stage 7 backend path.
+
+### Backend bridge and protocol
+
+The extension starts `python -m bridge` (using `procoder.pythonPath`) in the
+ProCoder root and exchanges versioned JSON Lines over stdin/stdout. Protocol
+version 1 commands are `run`, `voice_start`, `voice_stop`,
+`transcript_decision`, `cancel` and `shutdown`. Backend events include
+`workflow_started`, `planning_started`, `planning_completed`,
+`generation_started`, `generation_completed`, `testing_started`,
+`testing_completed`, `review_started`, `review_completed`, `repair_started`,
+`repair_completed`, `transcript_ready`, and `workflow_completed`. Each message
+has a `protocol_version` and `type`; stdout is reserved for protocol messages,
+while structured diagnostics go to `logs/procoder.jsonl`. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#stage-8-vs-code-extension) for
+the protocol and security boundary.
+
+The bridge calls the existing Python run entry point and sends only a
+whitelisted set of status/result fields. It never sends prompts or credentials
+to runtime logs. The extension does not read `.env` or forward provider
+credentials; Python loads backend configuration locally. The child process
+environment is limited to operating-system necessities, so provider keys
+should be configured in the backend `.env` file rather than only in the VS
+Code process environment.
+
+Generated-file open requests contain only a validated run ID and relative
+filename. Python lists files using `GeneratedProjectWriter` validation; the
+extension independently rejects traversal, sensitive names, symlinks,
+hardlinks and paths outside `workspace/generated_code/<run_id>/`. The
+extension cannot execute generated code or issue arbitrary shell commands.
+Workflow cancellation is not supported once agents or Docker are running;
+voice recording can be cancelled safely.
+
 ## Automatic Repair Loop
 
 When the initial Docker tests fail or NVIDIA requires a repair, the Python controller runs:
@@ -308,6 +379,13 @@ Run the repository test suite from the root:
 python -m unittest discover -s tests -v
 ```
 
+Run the extension's offline tests and TypeScript compilation from
+`vscode-extension/`:
+
+```powershell
+npm.cmd test
+```
+
 Docker-dependent integration tests require a running Docker daemon and the locally built `procoder-sandbox:local` image. The repair-loop integration test exercises a deliberately broken calculator fixture with offline provider doubles; it does not make live Gemini, NVIDIA or Codex requests. To run it separately:
 
 ```sh
@@ -328,6 +406,8 @@ voice/                Microphone capture, transcript handling and local STT adap
 workspace/            Generated projects and run-metadata storage
 tests/                Offline tests and Docker-conditional integrations
 docs/                 Architecture and implementation notes
+vscode-extension/     TypeScript VS Code sidebar and JSONL protocol client
+bridge.py             Versioned stdio bridge to the Python workflow
 main.py               CLI entry point
 requirements.txt      Pinned Python dependencies
 .env.example          Supported configuration names/defaults
@@ -340,6 +420,7 @@ requirements.txt      Pinned Python dependencies
 - The container receives only a read-only bind mount of the selected generated run. It is not given the Docker socket or provider credentials; the Docker CLI process also uses a restricted environment allowlist.
 - Workspace path validation rejects traversal, absolute paths, symlinks/junctions, hard links, protected credential/configuration files and Docker configuration. Repair patches are confined to the generated run workspace.
 - Voice capture is explicitly user-started and duration-bounded. The temporary WAV is deleted after transcription; the local transcription subprocess receives only the audio path and model name, with an operating-system environment allowlist that omits provider credentials. Transcripts are untrusted and require user confirmation before the normal workflow starts.
+- The VS Code extension is a presentation/control client. It starts the Python bridge with a restricted operating-system environment, never reads `.env` or receives provider keys in UI messages, and cannot execute generated code. Backend JSONL events are field-whitelisted; generated files can only be opened under a validated run directory.
 - `.env` and runtime outputs are excluded from Git. Provider prompts and credentials are not copied into runtime logs.
 - Generated source, comments and process output are treated as untrusted data by review/repair prompts. Docker results, not LLM statements, determine whether tests actually passed.
 

@@ -25,6 +25,8 @@ workspace/test_results/*
 .idea/
 .DS_Store
 Thumbs.db
+!vscode-extension/.vscode/
+!vscode-extension/.vscode/**
 
 # ProCoder runtime data
 logs/*

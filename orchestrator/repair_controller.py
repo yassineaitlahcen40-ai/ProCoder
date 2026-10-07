@@ -83,9 +83,11 @@ class RepairController:
             files_modified=generated.files_modified,
             duration_seconds=generated.duration_seconds,
         )
+        self._emit("testing_started", run_id=run_id, attempt=0)
         initial_test = self._sandbox_runner.run_project(
             run_directory, language=current_code.language
         )
+        self._emit_test_completed(run_id, 0, initial_test)
         try:
             self._metadata.save_test_result(run_id, initial_test)
         except RunMetadataError as exc:
@@ -122,12 +124,14 @@ class RepairController:
 
         if not initial_test.infrastructure_error:
             try:
+                self._emit("review_started", run_id=run_id, attempt=0)
                 review = self._get_review_agent().review(
                     specification, current_code, initial_test
                 )
                 reviews.append(review)
                 latest_review = review
                 review_duration += review.duration_seconds or 0.0
+                self._emit_review_completed(run_id, 0, review)
             except ReviewAgentError as exc:
                 self._log_termination(run_id, TerminationReason.PROVIDER_ERROR, exc)
             else:
@@ -179,17 +183,33 @@ class RepairController:
                         self._log_termination(run_id, termination, exc)
                     else:
                         try:
+                            self._emit(
+                                "testing_started",
+                                run_id=run_id,
+                                attempt=attempt_number,
+                            )
                             final_test = self._sandbox_runner.run_project(
                                 run_directory, language=current_code.language
                             )
                             self._metadata.save_test_result(run_id, final_test)
+                            self._emit_test_completed(
+                                run_id, attempt_number, final_test
+                            )
                             if not final_test.infrastructure_error:
+                                self._emit(
+                                    "review_started",
+                                    run_id=run_id,
+                                    attempt=attempt_number,
+                                )
                                 after_review = self._get_review_agent().review(
                                     specification, current_code, final_test
                                 )
                                 reviews.append(after_review)
                                 latest_review = after_review
                                 review_duration += after_review.duration_seconds or 0.0
+                                self._emit_review_completed(
+                                    run_id, attempt_number, after_review
+                                )
                         except ReviewAgentError as exc:
                             termination = TerminationReason.PROVIDER_ERROR
                             self._log_termination(run_id, termination, exc)
@@ -247,6 +267,16 @@ class RepairController:
                             self._metadata.save_generated(run_id, current_code)
                             self._metadata.save_test_result(run_id, final_test)
                         self._metadata.save_repair_history(run_id, tuple(history))
+                        self._emit(
+                            "repair_attempt_completed",
+                            run_id=run_id,
+                            attempt=attempt_number,
+                            patch_applied=patch_applied,
+                            files_created=list(record.files_created),
+                            files_modified=list(record.files_modified),
+                            files_deleted=list(record.files_deleted),
+                            termination_reason=termination.value,
+                        )
                     except RunMetadataError as exc:
                         termination = TerminationReason.PERSISTENCE_ERROR
                         self._log_termination(run_id, termination, exc)
@@ -370,6 +400,35 @@ class RepairController:
             run_id=run_id,
             attempt=attempt,
             max_attempts=self._settings.max_repair_attempts,
+        )
+
+    def _emit_test_completed(self, run_id: str, attempt: int, result: TestResult) -> None:
+        self._emit(
+            "testing_completed",
+            run_id=run_id,
+            attempt=attempt,
+            passed=result.passed,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            infrastructure_error=result.infrastructure_error,
+            tests_passed=result.tests_passed,
+            tests_failed=result.tests_failed,
+            tests_skipped=result.tests_skipped,
+            output_truncated=result.output_truncated,
+        )
+
+    def _emit_review_completed(
+        self, run_id: str, attempt: int, review: ReviewResult
+    ) -> None:
+        self._emit(
+            "review_completed",
+            run_id=run_id,
+            attempt=attempt,
+            verdict=review.verdict.value,
+            specification_satisfied=review.specification_satisfied,
+            tests_passed=review.tests_passed,
+            repair_required=review.repair_required,
+            confidence=review.confidence,
         )
 
     def _get_review_agent(self) -> ReviewAgent:

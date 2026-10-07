@@ -1,0 +1,63 @@
+{
+  "name": "procoder-vscode",
+  "displayName": "ProCoder",
+  "description": "VS Code interface for the local ProCoder multi-agent backend.",
+  "version": "0.1.0",
+  "publisher": "procoder",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:procoder.sidebar"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "procoder.focus",
+        "title": "ProCoder: Focus Sidebar"
+      }
+    ],
+    "configuration": {
+      "title": "ProCoder",
+      "properties": {
+        "procoder.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable that can import the ProCoder backend in the workspace."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "procoder",
+          "title": "ProCoder",
+          "icon": "resources/procoder.svg"
+        }
+      ]
+    },
+    "views": {
+      "procoder": [
+        {
+          "id": "procoder.sidebar",
+          "name": "Assistant",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "test": "npm run compile && node --test out/tests/protocol.test.js",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.7.3"
+  }
+}

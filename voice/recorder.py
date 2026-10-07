@@ -36,6 +36,7 @@ class MicrophoneRecorder:
         stream_factory: Callable[..., _AudioInputStream] | None = None,
         input_available: Callable[[], bool] | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        on_started: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sample_rate = sample_rate
@@ -43,6 +44,7 @@ class MicrophoneRecorder:
         self._stream_factory = stream_factory or self._default_stream_factory
         self._input_available = input_available or self._default_input_available
         self._stop_requested = stop_requested or _enter_was_pressed
+        self._on_started = on_started
         self._clock = clock
 
     def record(self, max_duration_seconds: int) -> AudioRecording:
@@ -63,13 +65,18 @@ class MicrophoneRecorder:
         except Exception as exc:
             raise VoiceRecordingError() from exc
 
-        print("Recording started. Press Enter to stop; recording stops automatically "
-              f"after {max_duration_seconds} seconds.")
+        if self._on_started is None:
+            print(
+                "Recording started. Press Enter to stop; recording stops "
+                f"automatically after {max_duration_seconds} seconds."
+            )
         audio = bytearray()
         started = self._clock()
         deadline = started + max_duration_seconds
         try:
             stream.start()
+            if self._on_started is not None:
+                self._on_started()
             while True:
                 remaining = deadline - self._clock()
                 if remaining <= 0 or self._stop_requested():
