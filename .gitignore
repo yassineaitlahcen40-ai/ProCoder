@@ -1,0 +1,41 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime outputs
+logs/*.jsonl*
+workspace/generated_code/*
+!workspace/generated_code/.gitkeep
+workspace/test_results/*
+!workspace/test_results/.gitkeep
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ProCoder runtime data
+logs/*
+!logs/.gitkeep
+
+workspace/generated_code/*
+!workspace/generated_code/.gitkeep
+
+workspace/test_results/*
+!workspace/test_results/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
